@@ -54,34 +54,33 @@ class AscendSFABackend(AttentionBackend):
         return AscendSFAImpl
 
 
-@dataclass
 class AscendSFAPrefillMetadata:
-    """ Prefill Specific Metadata for Ascend"""
+    """Prefill 阶段在 Ascend SFA(Flash-Attention) 路径下使用的专用元数据。"""
 
     @dataclass
     class ChunkedContextMetadata:
-        # New for MLA (compared to FlashAttention)
-        # For handling chunked prefill
-        cu_seq_lens: torch.Tensor
-        starts: torch.Tensor
-        seq_tot: list[int]
-        max_seq_lens: list[int]
-        workspace: torch.Tensor
-        chunk_seq_lens: torch.Tensor
+        # —— 用于“分块 prefill（chunked prefill）”场景，按块加载/计算上下文 —— #
+        cu_seq_lens: torch.Tensor          # 累积序列长度(cumulative lengths)，形如 [0, L1, L1+L2, ...]，供内核快速定位批内每段起止
+        starts: torch.Tensor               # 每个 chunk 在全局序列中的起始位置（索引或偏移），与 block_table/seq_lens 共同确定读取范围
+        seq_tot: list[int]                 # 本批次每轮/每个 chunk 的总 token 数（用于循环分块时的迭代计数）
+        max_seq_lens: list[int]            # 每轮/每个 chunk 的最大序列长度（用于预分配/对齐 workspace）
+        workspace: torch.Tensor            # 算子临时工作区缓冲（预先分配好以避免重复 malloc/free）
+        chunk_seq_lens: torch.Tensor       # 每个 chunk 的实际序列长度张量（int32），与 seq_tot 对应，驱动内核实际参与长度
 
-    attn_mask: torch.Tensor
-    query_lens: list[int]
-    seq_lens: list[int]
+    # —— 通用 prefill 元数据（非分块也会用到） —— #
+    attn_mask: torch.Tensor                # 注意力掩码（因果/可见性），布尔或数值型；需与内核约定的广播形状兼容
+    query_lens: list[int]                  # 每个请求本次 prefill 的“新 Query token 数”，如 [q1, q2, ...]
+    seq_lens: list[int]                    # 每个请求本次注意力中 Key/Value 侧的总有效长度（历史+本次），如 [k1, k2, ...]
 
-    context_lens: torch.Tensor
-    input_positions: torch.Tensor
-    query_start_loc: torch.Tensor
-    block_table: torch.Tensor
-    max_query_len: int
-    max_seq_lens: int
-    sin: torch.Tensor
-    cos: torch.Tensor
-    chunked_context: Optional[ChunkedContextMetadata] = None
+    context_lens: torch.Tensor             # 每个请求已缓存的上下文长度（KV-cache 中的历史长度），形如 [c1, c2, ...]
+    input_positions: torch.Tensor          # 扁平化后的 token 位置索引（绝对/相对位置），用于从平铺批次还原到各请求片段
+    query_start_loc: torch.Tensor          # 每个请求在扁平数组中的起始下标(累积位点)，长度= num_reqs+1；差分得到各请求 query 段长度
+    block_table: torch.Tensor              # Paged KV 的块表/页表：将逻辑位置映射到 KV-cache 物理块序号，形如 [num_reqs, num_blocks_per_req]
+    max_query_len: int                     # 本批内 query_lens 的最大值（用于图/内核的定长分配与 padding）
+    max_seq_lens: int                      # 本批内 seq_lens 的最大值（同上，用于 workspace/对齐）
+    sin: torch.Tensor                      # 旋转位置编码(ROPE)的 sin 值缓存（prefill 用，形如 [T, rope_dim] 或可广播形状）
+    cos: torch.Tensor                      # 旋转位置编码(ROPE)的 cos 值缓存（与 sin 配对）
+    chunked_context: Optional[ChunkedContextMetadata] = None  # 分块上下文信息；非分块场景为 None
 
 
 @dataclass
